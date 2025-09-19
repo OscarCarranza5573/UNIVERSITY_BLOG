@@ -1,0 +1,202 @@
+version: '3.8'
+
+services:
+  # Base de datos MySQL para autenticación
+  mysql:
+    image: mysql:8.0
+    container_name: university_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword123
+      MYSQL_DATABASE: university_auth
+      MYSQL_USER: app_user
+      MYSQL_PASSWORD: app_password123
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./scripts/database/mysql-init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - university-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 5s
+      retries: 10
+
+  # Base de datos MongoDB para CVs y archivos
+  mongodb:
+    image: mongo:6.0
+    container_name: university_mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: adminpassword123
+      MONGO_INITDB_DATABASE: university_cvs
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+      - ./scripts/database/mongo-init.js:/docker-entrypoint-initdb.d/init.js
+    networks:
+      - university-network
+    healthcheck:
+      test: ["CMD","mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+
+  # Redis para caching (opcional pero recomendado)
+  redis:
+    image: redis:7-alpine
+    container_name: university_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - university-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # API Gateway
+  api-gateway:
+    build: 
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    container_name: university_gateway
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+      - AUTH_SERVICE_URL=http://auth-service:3001
+      - CV_SERVICE_URL=http://cv-service:3002
+      - FILE_SERVICE_URL=http://file-service:3003
+    depends_on:
+      auth-service:
+        condition: service_healthy
+      cv-service:
+        condition: service_healthy
+      file-service:
+        condition: service_healthy
+    networks:
+      - university-network
+    volumes:
+      - ./api-gateway/src:/app/src
+      - ./shared:/app/shared
+
+  # Servicio de Autenticación
+  auth-service:
+    build: 
+      context: ./auth-service
+      dockerfile: Dockerfile
+    container_name: university_auth
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=development
+      - PORT=3001
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_USER=app_user
+      - DB_PASSWORD=app_password123
+      - DB_NAME=university_auth
+      - JWT_SECRET=your-super-secret-jwt-key-here-change-in-production
+      - JWT_EXPIRES_IN=24h
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - university-network
+    volumes:
+      - ./auth-service/src:/app/src
+      - ./shared:/app/shared
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Servicio de CVs
+  cv-service:
+    build: 
+      context: ./cv-service
+      dockerfile: Dockerfile
+    container_name: university_cvs
+    restart: unless-stopped
+    ports:
+      - "3002:3002"
+    environment:
+      - NODE_ENV=development
+      - PORT=3002
+      - MONGO_URL=mongodb://admin:adminpassword123@mongodb:27017/university_cvs?authSource=admin
+      - REDIS_URL=redis://redis:6379
+      - FILE_SERVICE_URL=http://file-service:3003
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - university-network
+    volumes:
+      - ./cv-service/src:/app/src
+      - ./shared:/app/shared
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Servicio de Archivos
+  file-service:
+    build: 
+      context: ./file-service
+      dockerfile: Dockerfile
+    container_name: university_files
+    restart: unless-stopped
+    ports:
+      - "3003:3003"
+    environment:
+      - NODE_ENV=development
+      - PORT=3003
+      - MONGO_URL=mongodb://admin:adminpassword123@mongodb:27017/university_cvs?authSource=admin
+      - MAX_FILE_SIZE=5242880
+      - ALLOWED_TYPES=image/jpeg,image/jpg,image/png,image/webp
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - university-network
+    volumes:
+      - ./file-service/src:/app/src
+      - ./shared:/app/shared
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3003/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  mysql_data:
+    driver: local
+  mongo_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  university-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
